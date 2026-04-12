@@ -86,9 +86,16 @@ def run_single_file_pipeline(filepath: str):
         
         for file_info in dirty_files:
             target_path = file_info["path"]
-            print(f"Processing (Tree-sitter parse mock): {target_path}")
+            print(f"Extracting AST for (Watcher): {target_path}")
             
-            # TODO: Step 5 Parse & Extract
+            # Step 5: Parse & Extract
+            try:
+                with open(target_path, "rb") as f:
+                    source_code = f.read()
+                from src.core.parser.extractor.extractor import extract_and_store
+                extract_and_store(target_path, file_info["language"], source_code)
+            except Exception as e:
+                print(f"Extraction failed for {target_path}: {e}")
             
             # Step 6: Update Hash Registry
             update_file_hash(
