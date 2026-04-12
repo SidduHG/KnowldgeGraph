@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+pydantic
+tree-sitter>=0.21.0
+watchdog
