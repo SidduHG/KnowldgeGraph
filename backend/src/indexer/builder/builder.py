@@ -2,6 +2,7 @@ import time
 from src.core.store.db import get_connection
 from src.core.store.hash_registry import update_file_hash, delete_file_hash
 from src.indexer.dirty_set.dirty_set import build_dirty_set
+from src.indexer.propagator.propagator import propagate_dirty_set
 
 def run_pipeline(repo_path: str):
     """Orchestrates Phase 1: Scanning, hashing, and storing."""
@@ -14,7 +15,11 @@ def run_pipeline(repo_path: str):
     print("Building dirty set...")
     dirty_files, deleted_files = build_dirty_set(repo_path)
     
-    # 2. Handle deleted files
+    # 2. Propagate dirty set to reverse dependencies (Step 4)
+    print("Propagating dirty set to importers...")
+    dirty_files = propagate_dirty_set(dirty_files)
+    
+    # 3. Handle deleted files
     for deleted_file in deleted_files:
         print(f"File Deleted: {deleted_file}")
         delete_file_hash(deleted_file)
