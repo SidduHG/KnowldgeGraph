@@ -82,3 +82,15 @@ async def init_db() -> None:
 async def close_db() -> None:
     await engine.dispose()
     logger.info("Database connections closed")
+
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        yield session
+
+@asynccontextmanager
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        yield session
