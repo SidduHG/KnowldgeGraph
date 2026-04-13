@@ -1,5 +1,6 @@
 import os
 import pytest
+import pytest_asyncio
 import asyncio
 from pathlib import Path
 
@@ -13,7 +14,7 @@ def event_loop():
     yield loop
     loop.close()
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def setup_db():
     await init_db()
     yield
