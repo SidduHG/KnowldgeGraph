@@ -1,121 +1,72 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import React, { useEffect } from "react";
+import { useAppStore } from "./hooks/useAppStore";
+import { StatsBar } from "./components/StatsBar";
+import { IndexPanel } from "./components/IndexPanel";
+import { GraphView } from "./components/GraphView";
+import { Sidebar } from "./components/Sidebar";
+import { NodeDetail } from "./components/NodeDetail";
 
-function App() {
-  const [count, setCount] = useState(0)
+export default function App() {
+  const {
+    stats, indexStatus, watching, nodes, edges,
+    selectedNode, loading, error,
+    fetchStats, fetchIndexStatus, startIndex, startWatch, stopWatch,
+    search, loadAllNodes, loadEdges, selectNode, clearError,
+  } = useAppStore();
+
+  useEffect(() => {
+    fetchStats();
+    fetchIndexStatus();
+    loadAllNodes().then(loadEdges);
+    const t = setInterval(() => { fetchStats(); fetchIndexStatus(); }, 5000);
+    return () => clearInterval(t);
+  }, []);
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div style={{
+      height: "100vh", display: "flex", flexDirection: "column",
+      background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-sans)",
+    }}>
+      <div style={{
+        display: "flex", alignItems: "center",
+        borderBottom: "1px solid var(--border)",
+        padding: "0 20px", height: 44, flexShrink: 0,
+      }}>
+        <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: ".04em",
+          marginRight: 24, color: "var(--text)" }}>
+          ◈ CKG
+        </span>
+        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+          Code Knowledge Graph
+        </span>
+        {loading && (
+          <span style={{ marginLeft: "auto", fontSize: 11, color: "#BA7517" }}>
+            ● indexing…
+          </span>
+        )}
+        {error && (
+          <span onClick={clearError} style={{ marginLeft: "auto", fontSize: 11,
+            color: "#993556", cursor: "pointer" }}>
+            ✗ {error}
+          </span>
+        )}
+      </div>
 
-      <div className="ticks"></div>
+      <StatsBar stats={stats} watching={watching} />
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      <IndexPanel
+        indexStatus={indexStatus} loading={loading} watching={watching}
+        onIndex={startIndex} onStartWatch={startWatch} onStopWatch={stopWatch}
+      />
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+      <div style={{ flex: 1, display: "flex", overflow: "hidden", position: "relative" }}>
+        <Sidebar
+          nodes={nodes} selectedNode={selectedNode}
+          onSearch={search} onSelect={selectNode}
+        />
+        <GraphView nodes={nodes} edges={edges} onNodeClick={selectNode} />
+        <NodeDetail node={selectedNode} onClose={() => selectNode(null)} />
+      </div>
+    </div>
+  );
 }
-
-export default App
