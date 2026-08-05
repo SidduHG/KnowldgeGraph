@@ -15,10 +15,27 @@ export default function App() {
   } = useAppStore();
 
   useEffect(() => {
+    // Load everything on mount
     fetchStats();
     fetchIndexStatus();
-    loadAllNodes().then(loadEdges);
-    const t = setInterval(() => { fetchStats(); fetchIndexStatus(); }, 5000);
+    loadAllNodes().then(() => loadEdges());
+
+    let lastNodeCount = 0;
+
+    // Poll for updates every 4s; auto-reload graph when DB changes
+    const t = setInterval(async () => {
+      await fetchStats();
+      await fetchIndexStatus();
+      const currentStats = useAppStore.getState().stats;
+      const currentNodeCount = currentStats?.total_nodes ?? 0;
+
+      // Auto-reload graph when new data appears in DB
+      if (currentNodeCount > 0 && currentNodeCount !== lastNodeCount) {
+        lastNodeCount = currentNodeCount;
+        await loadAllNodes();
+        await loadEdges();
+      }
+    }, 4000);
     return () => clearInterval(t);
   }, []);
 

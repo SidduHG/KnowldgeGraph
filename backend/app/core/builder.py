@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -69,6 +70,41 @@ class GraphBuilder:
         self._hashes = HashStore(session)
         self._deps = DepStore(session)
 
+        # Cross-file resolution caches (populated lazily on first use)
+        self._qname_index: Optional[Dict[str, str]] = None     # qualified_name → id
+        self._name_index: Optional[Dict[str, List[str]]] = None  # name → [ids]
+
+    async def _ensure_indexes(self) -> None:
+        """Load qname/name → id indexes from DB once per builder instance."""
+        if self._qname_index is not None:
+            return
+        r = await self._session.execute(
+            text("SELECT id, name, qualified_name FROM nodes")
+        )
+        qname_map: Dict[str, str] = {}
+        name_map: Dict[str, List[str]] = {}
+        for row in r.fetchall():
+            nid, name, qn = row[0], row[1], row[2]
+            if qn:
+                # Shorter qname wins a collision (closer match usually better)
+                prev = qname_map.get(qn)
+                if prev is None:
+                    qname_map[qn] = nid
+            name_map.setdefault(name, []).append(nid)
+        self._qname_index = qname_map
+        self._name_index = name_map
+
+    def _register_new_nodes(self, node_records: List[NodeRecord]) -> None:
+        """Keep the in-memory indexes up-to-date after upserting a file."""
+        if self._qname_index is None or self._name_index is None:
+            return
+        for n in node_records:
+            if n.qualified_name:
+                self._qname_index[n.qualified_name] = n.id
+            ids = self._name_index.setdefault(n.name, [])
+            if n.id not in ids:
+                ids.append(n.id)
+
     async def build_file(
         self,
         file_path: str,
@@ -119,13 +155,18 @@ class GraphBuilder:
                     end_line=pn.end_line,
                     signature=pn.signature,
                     docstring=pn.docstring,
+                    source_snippet=pn.source_snippet,
                     language=pn.language,
                 )
             )
 
         stats["nodes"] = await self._nodes.upsert_many(node_records)
 
-        # 5. Upsert edges (skip unresolved targets)
+        # Make newly-upserted nodes available to subsequent cross-file lookups
+        await self._ensure_indexes()
+        self._register_new_nodes(node_records)
+
+        # 5. Upsert edges — WITH cross-file resolution
         edge_records: List[EdgeRecord] = []
         for pe in result.edges:
             src_id = qname_to_id.get(pe.source_qualified)
@@ -134,8 +175,15 @@ class GraphBuilder:
             # For FILE-level DEFINES, source is the file node
             if src_id is None:
                 src_id = qname_to_id.get(pe.source_qualified)
+
+            # ── Cross-file edge resolution ──
+            if tgt_id is None and pe.type in ("CALLS", "INHERITS", "IMPORTS"):
+                # Try to find the target by name in DB (cross-file lookup)
+                tgt_id = await self._resolve_cross_file_target(
+                    pe.target_qualified, pe.type
+                )
+
             if src_id is None or tgt_id is None:
-                # Cross-file edge — skip for now; Phase 2 handles cross-file resolution
                 continue
 
             edge_records.append(
@@ -158,6 +206,62 @@ class GraphBuilder:
         await self._hashes.upsert(file_path, sha256, size, language)
 
         return stats
+
+    async def _resolve_cross_file_target(
+        self, target_qualified: str, edge_type: str
+    ) -> Optional[str]:
+        """
+        Resolve a cross-file reference to an existing node ID.
+        Handles patterns like:
+          - "module.ClassName" → look up by qualified_name suffix
+          - "ClassName"        → look up by name
+          - "self.method"      → strip self. prefix
+          - "obj.method"       → use the short name, verify by suffix when possible
+
+        Uses the in-memory qname/name indexes built once per builder instance,
+        so this is O(1) per call after the first.
+        """
+        await self._ensure_indexes()
+        assert self._qname_index is not None and self._name_index is not None
+
+        # Clean up common prefixes
+        clean = target_qualified
+        if clean.startswith("self."):
+            clean = clean[5:]
+        elif clean.startswith("cls."):
+            clean = clean[4:]
+
+        # 1. Exact qualified-name hit
+        hit = self._qname_index.get(clean)
+        if hit:
+            return hit
+
+        # 2. Suffix match on qualified_name — walk the cache (usually tiny
+        # relative to the gain of not issuing a SQL round-trip per edge).
+        # Only attempted for dotted references.
+        if "." in clean:
+            suffix = "." + clean if not clean.startswith(".") else clean
+            # Prefer the shortest qname that ends with the suffix
+            best: Optional[str] = None
+            best_len = 10**9
+            for qn, nid in self._qname_index.items():
+                if qn.endswith(suffix) and len(qn) < best_len:
+                    best = nid
+                    best_len = len(qn)
+            if best:
+                return best
+            short_name = clean.rsplit(".", 1)[-1]
+        else:
+            short_name = clean
+
+        # 3. Fall back to bare-name match.
+        # If there is exactly one symbol with this name, it's unambiguous.
+        # If many, we skip — a wrong CALLS edge is worse than a missing one.
+        ids = self._name_index.get(short_name, [])
+        if len(ids) == 1:
+            return ids[0]
+
+        return None
 
     async def build_dirty_set(
         self,

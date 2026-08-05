@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "ckg": {
+      "command": "python",
+      "args": [
+        "mcp_server/app/adapters/claude_stdio.py"
+      ],
+      "env": {
+        "MYSQL_HOST": "localhost",
+        "MYSQL_PORT": "3307",
+        "MYSQL_USER": "ckg_user",
+        "MYSQL_PASSWORD": "ckg_password",
+        "MYSQL_DATABASE": "ckg",
+        "PYTHONPATH": "mcp_server"
+      }
+    }
+  }
+}

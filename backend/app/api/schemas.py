@@ -62,6 +62,7 @@ class NodeOut(BaseModel):
     end_line: Optional[int]
     signature: Optional[str]
     docstring: Optional[str]
+    source_snippet: Optional[str] = None
     language: Optional[str]
 
 

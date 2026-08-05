@@ -8,6 +8,7 @@ export interface NodeOut {
   end_line: number | null;
   signature: string | null;
   docstring: string | null;
+  source_snippet: string | null;
   language: string | null;
 }
 

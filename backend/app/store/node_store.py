@@ -25,6 +25,7 @@ class NodeRecord:
     end_line: Optional[int] = None
     signature: Optional[str] = None
     docstring: Optional[str] = None
+    source_snippet: Optional[str] = None
     language: Optional[str] = None
 
 class NodeStore:
@@ -38,10 +39,10 @@ class NodeStore:
                 """
                 INSERT INTO nodes
                     (id, type, name, qualified_name, file_path,
-                     start_line, end_line, signature, docstring, language)
+                     start_line, end_line, signature, docstring, source_snippet, language)
                 VALUES
                     (:id, :type, :name, :qn, :fp,
-                     :sl, :el, :sig, :doc, :lang)
+                     :sl, :el, :sig, :doc, :snip, :lang)
                 ON DUPLICATE KEY UPDATE
                     type            = VALUES(type),
                     name            = VALUES(name),
@@ -51,6 +52,7 @@ class NodeStore:
                     end_line        = VALUES(end_line),
                     signature       = VALUES(signature),
                     docstring       = VALUES(docstring),
+                    source_snippet  = VALUES(source_snippet),
                     language        = VALUES(language),
                     updated_at      = CURRENT_TIMESTAMP
                 """
@@ -65,6 +67,7 @@ class NodeStore:
                 "el": node.end_line,
                 "sig": node.signature,
                 "doc": node.docstring,
+                "snip": (node.source_snippet or "")[:2000],
                 "lang": node.language,
             },
         )

@@ -58,6 +58,10 @@ class IndexerService:
     """
     Singleton service that manages indexing state and coordinates
     the scanner + dirty-set propagation + graph builder.
+
+    Key behaviors:
+      - Per-repo isolation: clears old data when switching repos
+      - Non-blocking: yields to event loop between files so HTTP stays responsive
     """
 
     _instance: Optional["IndexerService"] = None
@@ -65,6 +69,7 @@ class IndexerService:
     def __init__(self) -> None:
         self.progress = IndexProgress()
         self._lock = asyncio.Lock()
+        self._current_repo: Optional[str] = None
 
     @classmethod
     def get(cls) -> "IndexerService":
@@ -76,11 +81,35 @@ class IndexerService:
     def is_running(self) -> bool:
         return self.progress.status == IndexStatus.RUNNING
 
+    @property
+    def current_repo(self) -> Optional[str]:
+        return self._current_repo
+
+    def reset(self) -> None:
+        """Force-reset from a stuck RUNNING state."""
+        logger.warning("Force-resetting indexer state from %s to IDLE", self.progress.status)
+        self.progress = IndexProgress()
+        self._lock = asyncio.Lock()
+
+    # ── Clear all data ────────────────────────────────────────────────────────
+    async def _clear_all_data(self) -> None:
+        """Wipe all graph data. Called when switching repos."""
+        logger.info("Clearing ALL graph data (switching repos)")
+        async with db_session() as session:
+            await session.execute(text("DELETE FROM edges"))
+            await session.execute(text("DELETE FROM nodes"))
+            await session.execute(text("DELETE FROM file_hashes"))
+            await session.execute(text("DELETE FROM file_deps"))
+            await session.execute(text("DELETE FROM index_runs"))
+        logger.info("Graph data cleared")
+
     # ── Full index ─────────────────────────────────────────────────────────────
     async def run_full(self, repo_path: str) -> IndexProgress:
+        if self._lock.locked():
+            logger.warning("Lock already held, skipping duplicate index request")
+            return self.progress
+
         async with self._lock:
-            if self.is_running:
-                raise RuntimeError("Index already running")
             self.progress = IndexProgress(
                 status=IndexStatus.RUNNING,
                 run_type="FULL",
@@ -88,36 +117,75 @@ class IndexerService:
                 started_at=time.time(),
             )
 
+        # ── Per-repo isolation: clear old data if repo changed ──
+        if self._current_repo and self._current_repo != repo_path:
+            logger.info("Repo changed from %s → %s, clearing old data",
+                        self._current_repo, repo_path)
+            await self._clear_all_data()
+
+        self._current_repo = repo_path
         run_id = await self._start_run("FULL", repo_path)
 
         try:
+            # ── 1. Scan filesystem (sync, in thread pool) ──
             scanner = RepoScanner(repo_path)
-            current_hashes = scanner.scan_with_hashes()
+            current_hashes = await asyncio.get_event_loop().run_in_executor(
+                None, scanner.scan_with_hashes
+            )
             language_map = {
                 fp: EXT_MAP.get(Path(fp).suffix.lower(), "unknown")
                 for fp in current_hashes
             }
 
-            # Force re-index everything
             dirty = set(current_hashes.keys())
             self.progress.files_total = len(dirty)
 
+            # Yield to event loop after scan so status poll works
+            await asyncio.sleep(0)
+
+            # ── 2. Expand dirty set & build graph ──
             async with db_session() as session:
                 deps = DepStore(session)
                 dirty = await deps.expand_dirty_set(dirty)
                 builder = GraphBuilder(session, repo_path)
-                stats = await builder.build_dirty_set(dirty, current_hashes, language_map)
 
-            self.progress.nodes_created = stats["nodes"]
-            self.progress.edges_created = stats["edges"]
-            self.progress.files_done = stats["files"]
-            self.progress.errors = stats["errors"]
+                total = {"nodes": 0, "edges": 0, "files": 0, "errors": 0}
+                file_list = sorted(dirty)
+
+                for i, fp in enumerate(file_list):
+                    sha = current_hashes.get(fp, "")
+                    lang = language_map.get(fp, "unknown")
+                    try:
+                        stats = await builder.build_file(fp, sha, lang)
+                        total["nodes"] += stats["nodes"]
+                        total["edges"] += stats["edges"]
+                        total["files"] += 1
+                        await session.commit()
+                    except Exception as exc:
+                        logger.error("Error building %s: %s", fp, exc)
+                        await session.rollback()
+                        total["errors"] += 1
+
+                    # Update progress live
+                    self.progress.files_done = total["files"]
+                    self.progress.nodes_created = total["nodes"]
+                    self.progress.edges_created = total["edges"]
+                    self.progress.errors = total["errors"]
+
+                    # ── CRITICAL: yield to event loop every 3 files ──
+                    # This allows HTTP requests (status polls) to be served
+                    if (i + 1) % 3 == 0:
+                        await asyncio.sleep(0)
+
             self.progress.status = IndexStatus.COMPLETED
             self.progress.completed_at = time.time()
             await self._complete_run(run_id, self.progress)
+            logger.info("✓ Index completed: %d files, %d nodes, %d edges in %.1fs",
+                        total["files"], total["nodes"], total["edges"],
+                        self.progress.elapsed_ms / 1000)
 
         except Exception as exc:
-            logger.error("Full index failed: %s", exc)
+            logger.error("Full index failed: %s", exc, exc_info=True)
             self.progress.status = IndexStatus.FAILED
             self.progress.error_message = str(exc)
             self.progress.completed_at = time.time()
@@ -131,7 +199,6 @@ class IndexerService:
     ) -> IndexProgress:
         async with self._lock:
             if self.is_running:
-                # Queue or skip — for now skip
                 logger.debug("Skipping incremental index (full in progress)")
                 return self.progress
             self.progress = IndexProgress(
@@ -154,18 +221,15 @@ class IndexerService:
                 self.progress.files_done = 1
             else:
                 sha = __import__("app.store.hash_store", fromlist=["compute_sha256"]).compute_sha256(file_path)
-                # Check if actually changed
                 async with db_session() as session:
                     stored_sha = await HashStore(session).get_hash(file_path)
 
                 if stored_sha == sha:
-                    logger.debug("Incremental: no change in %s", file_path)
                     self.progress.status = IndexStatus.COMPLETED
                     self.progress.files_skipped = 1
                     self.progress.completed_at = time.time()
                     return self.progress
 
-                # Propagate dirty set
                 dirty: Set[str] = {file_path}
                 current_hashes = {file_path: sha}
                 language_map = {
@@ -174,7 +238,6 @@ class IndexerService:
 
                 async with db_session() as session:
                     dirty = await DepStore(session).expand_dirty_set(dirty)
-                    # add current hashes for propagated files
                     for fp in dirty - {file_path}:
                         from app.store.hash_store import compute_sha256 as cs
                         current_hashes[fp] = cs(fp)
@@ -202,9 +265,7 @@ class IndexerService:
     async def _start_run(self, run_type: str, repo_path: str) -> int:
         async with db_session() as session:
             result = await session.execute(
-                text(
-                    "INSERT INTO index_runs (run_type, repo_path) VALUES (:rt, :rp)"
-                ),
+                text("INSERT INTO index_runs (run_type, repo_path) VALUES (:rt, :rp)"),
                 {"rt": run_type, "rp": repo_path},
             )
             return result.lastrowid
@@ -220,13 +281,9 @@ class IndexerService:
                        WHERE id=:id"""
                 ),
                 {
-                    "fs": prog.files_total,
-                    "fi": prog.files_done,
-                    "fsk": prog.files_skipped,
-                    "nc": prog.nodes_created,
-                    "ec": prog.edges_created,
-                    "dur": prog.elapsed_ms,
-                    "id": run_id,
+                    "fs": prog.files_total, "fi": prog.files_done,
+                    "fsk": prog.files_skipped, "nc": prog.nodes_created,
+                    "ec": prog.edges_created, "dur": prog.elapsed_ms, "id": run_id,
                 },
             )
 

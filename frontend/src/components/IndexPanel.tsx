@@ -13,7 +13,7 @@ interface Props {
 export const IndexPanel: React.FC<Props> = ({
   indexStatus, loading, watching, onIndex, onStartWatch, onStopWatch,
 }) => {
-  const [path, setPath] = useState("");
+  const [path, setPath] = useState("/repo/OneDrive/Desktop/Desktop/KnowldgeGraph");
 
   const pct = indexStatus?.pct ?? 0;
   const status = indexStatus?.status ?? "idle";
