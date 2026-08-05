@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 @dataclass
 class ParsedNode:
@@ -14,6 +14,7 @@ class ParsedNode:
     language: str
     signature: Optional[str] = None
     docstring: Optional[str] = None
+    source_snippet: Optional[str] = None  # Compact 5-10 line code snippet
 
 @dataclass
 class ParsedEdge:

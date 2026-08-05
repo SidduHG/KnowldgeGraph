@@ -20,9 +20,13 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-    pool_recycle=3600,
+    pool_size=5,
+    max_overflow=10,
+    pool_recycle=1800,
+    pool_timeout=10,       # Don't wait forever for a connection
+    connect_args={
+        "connect_timeout": 10,
+    },
 )
 
 # ── Session factory ───────────────────────────────────────────────────────────
@@ -64,16 +68,20 @@ async def init_db() -> None:
         return
 
     raw_sql = migration_file.read_text(encoding="utf-8")
-    # split on ; but ignore empty statements
-    statements = [s.strip() for s in raw_sql.split(";") if s.strip()]
+    # Split on ; but ignore empty statements and comments
+    statements = [
+        s.strip() for s in raw_sql.split(";")
+        if s.strip() and not s.strip().startswith("--")
+    ]
 
     async with engine.begin() as conn:
         for stmt in statements:
             try:
                 await conn.execute(text(stmt))
             except Exception as exc:
-                # table/index already exists → safe to ignore
-                if "already exists" in str(exc).lower():
+                err_lower = str(exc).lower()
+                # Already exists → safe to ignore
+                if "already exists" in err_lower or "duplicate" in err_lower:
                     continue
                 logger.warning("Migration warning: %s", exc)
 
@@ -82,15 +90,3 @@ async def init_db() -> None:
 async def close_db() -> None:
     await engine.dispose()
     logger.info("Database connections closed")
-
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        yield session
-
-@asynccontextmanager
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        yield session

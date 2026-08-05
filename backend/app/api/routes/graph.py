@@ -15,7 +15,7 @@ router = APIRouter(prefix="/graph", tags=["graph"])
 
 def _row_to_node(row: tuple) -> NodeOut:
     keys = ["id","type","name","qualified_name","file_path",
-            "start_line","end_line","signature","docstring","language"]
+            "start_line","end_line","signature","docstring","source_snippet","language"]
     return NodeOut(**dict(zip(keys, row)))
 
 
@@ -45,7 +45,7 @@ async def list_nodes(
     r = await db.execute(
         text(
             f"SELECT id,type,name,qualified_name,file_path,start_line,end_line,"
-            f"signature,docstring,language FROM nodes {where_sql} "
+            f"signature,docstring,source_snippet,language FROM nodes {where_sql} "
             f"ORDER BY file_path,start_line LIMIT :limit OFFSET :offset"
         ),
         params,
@@ -62,7 +62,7 @@ async def search_nodes(
     r = await db.execute(
         text(
             "SELECT id,type,name,qualified_name,file_path,start_line,end_line,"
-            "signature,docstring,language FROM nodes "
+            "signature,docstring,source_snippet,language FROM nodes "
             "WHERE name LIKE :q OR qualified_name LIKE :q "
             "ORDER BY CHAR_LENGTH(name) LIMIT :limit"
         ),
@@ -76,7 +76,7 @@ async def get_node(node_id: str, db: AsyncSession = Depends(get_db)) -> Any:
     r = await db.execute(
         text(
             "SELECT id,type,name,qualified_name,file_path,start_line,end_line,"
-            "signature,docstring,language FROM nodes WHERE id = :id"
+            "signature,docstring,source_snippet,language FROM nodes WHERE id = :id"
         ),
         {"id": node_id},
     )
@@ -91,7 +91,7 @@ async def list_edges(
     source_id: str | None = Query(None),
     target_id: str | None = Query(None),
     type: str | None = Query(None),
-    limit: int = Query(100, le=500),
+    limit: int = Query(100, le=2000),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     wheres = []
@@ -125,7 +125,7 @@ async def get_file_map(
     r = await db.execute(
         text(
             "SELECT id,type,name,qualified_name,file_path,start_line,end_line,"
-            "signature,docstring,language FROM nodes WHERE file_path = :fp "
+            "signature,docstring,source_snippet,language FROM nodes WHERE file_path = :fp "
             "ORDER BY start_line"
         ),
         {"fp": path},

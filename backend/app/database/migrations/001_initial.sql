@@ -1,95 +1,70 @@
 -- ============================================================
--- CKG - Code Knowledge Graph  |  Migration 001 - Initial Schema (SQLite)
+-- CKG - Code Knowledge Graph  |  Migration 001 - Initial Schema (MySQL)
 -- ============================================================
 
--- SQLite requires enabling foreign keys per connection, but we define them here.
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS nodes (
-  id             TEXT NOT NULL PRIMARY KEY,
-  type           TEXT NOT NULL CHECK(type IN ('FILE','MODULE','CLASS','FUNCTION','METHOD','VARIABLE','TYPE')),
-  name           TEXT NOT NULL,
-  qualified_name TEXT DEFAULT NULL,
+  id             VARCHAR(64) NOT NULL PRIMARY KEY,
+  type           ENUM('FILE','MODULE','CLASS','FUNCTION','METHOD','VARIABLE','TYPE') NOT NULL,
+  name           VARCHAR(255) NOT NULL,
+  qualified_name VARCHAR(512) DEFAULT NULL,
   file_path      TEXT NOT NULL,
-  start_line     INTEGER DEFAULT NULL,
-  end_line       INTEGER DEFAULT NULL,
+  start_line     INT DEFAULT NULL,
+  end_line       INT DEFAULT NULL,
   signature      TEXT DEFAULT NULL,
   docstring      TEXT DEFAULT NULL,
-  language       TEXT DEFAULT NULL,
+  source_snippet TEXT DEFAULT NULL,
+  language       VARCHAR(32) DEFAULT NULL,
   created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
-CREATE INDEX IF NOT EXISTS idx_nodes_file_path ON nodes(file_path);
-CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
-
--- SQLite FTS5 Virtual Table for Full-Text Search
-CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-  name, 
-  signature, 
-  content='nodes', 
-  content_rowid='id'
-);
-
--- Triggers to keep FTS5 table in sync with nodes table
-CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
-  INSERT INTO nodes_fts(rowid, name, signature) VALUES (new.id, new.name, new.signature);
-END;
-CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
-  INSERT INTO nodes_fts(nodes_fts, rowid, name, signature) VALUES('delete', old.id, old.name, old.signature);
-END;
-CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
-  INSERT INTO nodes_fts(nodes_fts, rowid, name, signature) VALUES('delete', old.id, old.name, old.signature);
-  INSERT INTO nodes_fts(rowid, name, signature) VALUES (new.id, new.name, new.signature);
-END;
+  updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_nodes_name (name),
+  INDEX idx_nodes_type (type),
+  FULLTEXT INDEX idx_nodes_fts (name, signature)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS edges (
-  id          TEXT NOT NULL PRIMARY KEY,
-  source_id   TEXT NOT NULL,
-  target_id   TEXT NOT NULL,
-  type        TEXT NOT NULL CHECK(type IN ('DEFINES','IMPORTS','CALLS','INHERITS','CONTAINS','USES','EXPORTS')),
-  metadata    TEXT DEFAULT NULL, -- SQLite doesn't have native JSON type, JSON is stored as TEXT
+  id          VARCHAR(64) NOT NULL PRIMARY KEY,
+  source_id   VARCHAR(64) NOT NULL,
+  target_id   VARCHAR(64) NOT NULL,
+  type        ENUM('DEFINES','IMPORTS','CALLS','INHERITS','CONTAINS','USES','EXPORTS') NOT NULL,
+  metadata    JSON DEFAULT NULL,
   file_path   TEXT DEFAULT NULL,
   created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_edges_source (source_id),
+  INDEX idx_edges_target (target_id),
+  INDEX idx_edges_type (type),
   FOREIGN KEY (source_id) REFERENCES nodes(id) ON DELETE CASCADE,
   FOREIGN KEY (target_id) REFERENCES nodes(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
-CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
-CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(type);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS file_hashes (
-  path        TEXT NOT NULL PRIMARY KEY,
-  sha256      TEXT NOT NULL,
-  file_size   INTEGER DEFAULT 0,
-  language    TEXT DEFAULT NULL,
-  analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_fh_sha256 ON file_hashes(sha256);
+  path        VARCHAR(768) NOT NULL,
+  sha256      VARCHAR(64) NOT NULL,
+  file_size   INT DEFAULT 0,
+  language    VARCHAR(32) DEFAULT NULL,
+  analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (path(191)),
+  INDEX idx_fh_sha256 (sha256)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS file_deps (
-  importer    TEXT NOT NULL,
-  importee    TEXT NOT NULL,
-  PRIMARY KEY (importer, importee)
-);
-
-CREATE INDEX IF NOT EXISTS idx_fd_importee ON file_deps(importee);
+  importer    VARCHAR(760) NOT NULL,
+  importee    VARCHAR(760) NOT NULL,
+  PRIMARY KEY (importer(380), importee(380)),
+  INDEX idx_fd_importee (importee(380))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS index_runs (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_type        TEXT NOT NULL CHECK(run_type IN ('FULL','INCREMENTAL')),
+  id              INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  run_type        ENUM('FULL','INCREMENTAL') NOT NULL,
   repo_path       TEXT NOT NULL,
-  files_scanned   INTEGER DEFAULT 0,
-  files_indexed   INTEGER DEFAULT 0,
-  files_skipped   INTEGER DEFAULT 0,
-  nodes_created   INTEGER DEFAULT 0,
-  edges_created   INTEGER DEFAULT 0,
-  duration_ms     INTEGER DEFAULT NULL,
-  status          TEXT DEFAULT 'RUNNING' CHECK(status IN ('RUNNING','COMPLETED','FAILED')),
+  files_scanned   INT DEFAULT 0,
+  files_indexed   INT DEFAULT 0,
+  files_skipped   INT DEFAULT 0,
+  nodes_created   INT DEFAULT 0,
+  edges_created   INT DEFAULT 0,
+  duration_ms     INT DEFAULT NULL,
+  status          ENUM('RUNNING','COMPLETED','FAILED') DEFAULT 'RUNNING',
   error_message   TEXT DEFAULT NULL,
   started_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
   completed_at    DATETIME DEFAULT NULL
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -1,5 +1,5 @@
 """
-HTTP adapter — REST JSON API for Codex, Gemini, Cursor.
+HTTP adapter — REST JSON API for Codex, Gemini, Cursor, and any HTTP-based agent.
 
 Each agent integration:
 
@@ -7,11 +7,10 @@ Each agent integration:
              pointing at POST /tools/{tool_name}
 
   GEMINI   → use function declarations pointing at POST /tools/{tool_name}
-             or use /openai/tools for OpenAI-compatible format
 
   CURSOR   → add to .cursor/mcp.json using http transport
 
-  Any      → GET /config to get ready-made tool definitions for your agent
+  Any      → GET /config?agent=<type> to get ready-made tool definitions
 """
 from __future__ import annotations
 import logging
@@ -26,13 +25,14 @@ from app.config import settings
 from app.database import get_db
 from app.tools import resolvers
 from app.formatters.response import format_response
+from app.formatters.budget import count_tokens
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="CKG MCP Server",
-    description="Code Knowledge Graph — AI agent tool API",
-    version="1.0.0",
+    description="Code Knowledge Graph — AI agent tool API (10 tools for 95% token savings)",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -46,10 +46,14 @@ app.add_middleware(
 # ── Request / Response models ─────────────────────────────────────────────────
 
 class ToolRequest(BaseModel):
-    name:      Optional[str] = None
-    file_path: Optional[str] = None
-    query:     Optional[str] = None
-    type:      Optional[str] = None
+    name:       Optional[str] = None
+    file_path:  Optional[str] = None
+    query:      Optional[str] = None
+    type:       Optional[str] = None
+    class_name: Optional[str] = None
+    ref:        Optional[str] = None
+    repo_path:  Optional[str] = None
+    k:          Optional[int] = None
 
 
 class ToolResponse(BaseModel):
@@ -63,7 +67,7 @@ def _wrap(tool: str, data: dict) -> ToolResponse:
     text = format_response(tool, data)
     return ToolResponse(
         tool=tool, raw=data, text=text,
-        tokens_est=len(text.split()) * 4 // 3,
+        tokens_est=count_tokens(text),
     )
 
 
@@ -117,6 +121,60 @@ async def tool_get_related(req: ToolRequest, db: AsyncSession = Depends(get_db))
     return _wrap("get_related", data)
 
 
+@app.post("/tools/get_context", response_model=ToolResponse)
+async def tool_get_context(req: ToolRequest, db: AsyncSession = Depends(get_db)):
+    if not req.file_path:
+        raise HTTPException(400, "file_path is required")
+    data = await resolvers.get_context(db, req.file_path)
+    return _wrap("get_context", data)
+
+
+@app.post("/tools/get_hierarchy", response_model=ToolResponse)
+async def tool_get_hierarchy(req: ToolRequest, db: AsyncSession = Depends(get_db)):
+    if not req.class_name:
+        raise HTTPException(400, "class_name is required")
+    data = await resolvers.get_hierarchy(db, req.class_name)
+    return _wrap("get_hierarchy", data)
+
+
+@app.post("/tools/get_stats", response_model=ToolResponse)
+async def tool_get_stats(db: AsyncSession = Depends(get_db)):
+    data = await resolvers.get_stats(db)
+    return _wrap("get_stats", data)
+
+
+@app.post("/tools/get_definition", response_model=ToolResponse)
+async def tool_get_definition(req: ToolRequest, db: AsyncSession = Depends(get_db)):
+    if not req.name:
+        raise HTTPException(400, "name is required")
+    data = await resolvers.get_definition(db, req.name)
+    return _wrap("get_definition", data)
+
+
+@app.post("/tools/get_diff_context", response_model=ToolResponse)
+async def tool_get_diff_context(req: ToolRequest, db: AsyncSession = Depends(get_db)):
+    data = await resolvers.get_diff_context(
+        db, ref=req.ref or "HEAD", repo_path=req.repo_path
+    )
+    return _wrap("get_diff_context", data)
+
+
+@app.post("/tools/search_semantic", response_model=ToolResponse)
+async def tool_search_semantic(req: ToolRequest, db: AsyncSession = Depends(get_db)):
+    if not req.query:
+        raise HTTPException(400, "query is required")
+    data = await resolvers.search_semantic(
+        db, req.query, k=req.k or 10, symbol_type=req.type
+    )
+    return _wrap("search_semantic", data)
+
+
+@app.post("/tools/reindex_embeddings", response_model=ToolResponse)
+async def tool_reindex_embeddings(db: AsyncSession = Depends(get_db)):
+    data = await resolvers.reindex_embeddings(db)
+    return _wrap("reindex_embeddings", data)
+
+
 # ── Config / discovery endpoints ──────────────────────────────────────────────
 
 @app.get("/config")
@@ -127,11 +185,10 @@ async def get_config(agent: str = "auto"):
     """
     base_url = f"http://{settings.HOST}:{settings.PORT}"
 
-    # Tool descriptions shared across all formats
     tools_meta = [
         {
             "name": "get_function",
-            "description": "Get signature, docstring, and location of a function/class by name. Use before reading files.",
+            "description": "Get signature, docstring, and location of a function/class by name. Use BEFORE reading files to save tokens.",
             "params": {"name": {"type": "string", "description": "Function or class name"}},
             "required": ["name"],
         },
@@ -149,7 +206,7 @@ async def get_config(agent: str = "auto"):
         },
         {
             "name": "get_file_map",
-            "description": "List all symbols in a file without reading its full source.",
+            "description": "List all symbols in a file with caller/callee counts. Understand a file without reading it.",
             "params": {"file_path": {"type": "string", "description": "File path"}},
             "required": ["file_path"],
         },
@@ -165,14 +222,70 @@ async def get_config(agent: str = "auto"):
         },
         {
             "name": "get_related",
-            "description": "Get files related to a file via imports/calls. Shows blast radius.",
+            "description": "Get files related to a file via imports/calls (1-hop + 2-hop). Shows blast radius.",
             "params": {"file_path": {"type": "string", "description": "File path"}},
             "required": ["file_path"],
+        },
+        {
+            "name": "get_context",
+            "description": "THE PRIMARY TOOL — full file context without reading it: symbols, imports, all references. ~95% token savings.",
+            "params": {"file_path": {"type": "string", "description": "File path"}},
+            "required": ["file_path"],
+        },
+        {
+            "name": "get_hierarchy",
+            "description": "Class inheritance tree: parents, children, methods.",
+            "params": {"class_name": {"type": "string", "description": "Class name"}},
+            "required": ["class_name"],
+        },
+        {
+            "name": "get_stats",
+            "description": "Quick repo overview: file count, node/edge breakdown, hotspots. Use FIRST to orient.",
+            "params": {},
+            "required": [],
+        },
+        {
+            "name": "get_definition",
+            "description": "Exact definition of a symbol with its full call graph (what it calls, what calls it).",
+            "params": {"name": {"type": "string", "description": "Symbol name"}},
+            "required": ["name"],
+        },
+        {
+            "name": "search_semantic",
+            "description": (
+                "Natural-language symbol search over names + signatures + docstrings. "
+                "Use when you don't know the exact name — e.g. 'function that refreshes auth tokens'. "
+                "Requires embeddings to be indexed (call reindex_embeddings once after full index)."
+            ),
+            "params": {
+                "query": {"type": "string", "description": "Natural-language query"},
+                "k":     {"type": "integer", "description": "Top-k results (default 10)"},
+                "type":  {"type": "string", "enum": ["FUNCTION","CLASS","METHOD","VARIABLE","TYPE"]},
+            },
+            "required": ["query"],
+        },
+        {
+            "name": "reindex_embeddings",
+            "description": "Compute semantic embeddings for all nodes. Run once after a full index.",
+            "params": {},
+            "required": [],
+        },
+        {
+            "name": "get_diff_context",
+            "description": (
+                "PR-review superpower — given a git ref (HEAD, HEAD~1, main...feature, sha1..sha2), "
+                "return ONLY the symbols whose lines changed plus 1-hop callers/callees. "
+                "Replaces reading a raw diff with surgical, graph-aware context."
+            ),
+            "params": {
+                "ref":       {"type": "string", "description": "Git ref or range (default: HEAD)"},
+                "repo_path": {"type": "string", "description": "Optional repo root override"},
+            },
+            "required": [],
         },
     ]
 
     if agent in ("codex", "auto"):
-        # OpenAI function-calling format
         return {
             "agent": "codex",
             "format": "openai_tools",
@@ -212,6 +325,7 @@ async def get_config(agent: str = "auto"):
                         "properties": {
                             k: {"type": "STRING", "description": v["description"]}
                             for k, v in t["params"].items()
+                            if isinstance(v, dict) and "description" in v
                         },
                         "required": t["required"],
                     },
@@ -255,4 +369,7 @@ async def get_config(agent: str = "auto"):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "version": "1.0.0", "mode": settings.MODE}
+    return {
+        "ok": True, "version": "2.2.0", "mode": settings.MODE, "tools_count": 13,
+        "semantic_available": resolvers._embeddings.is_available(),
+    }

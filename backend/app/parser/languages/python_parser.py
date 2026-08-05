@@ -52,6 +52,24 @@ def _build_signature(fn_node: "Node") -> str:
     return f"{name}{params}{ret}"
 
 
+def _extract_snippet(source_lines: List[str], start: int, end: int, max_lines: int = 10) -> str:
+    """
+    Extract a compact source snippet from a node.
+    - For short nodes (<=max_lines), return the full source.
+    - For long nodes, return first 5 + last 3 lines with '...' separator.
+    """
+    # 0-indexed to match tree-sitter lines
+    lines = source_lines[start:end]
+    if not lines:
+        return ""
+    if len(lines) <= max_lines:
+        return "\n".join(lines).rstrip()
+    # First 5 + last 3  with ellipsis
+    head = lines[:5]
+    tail = lines[-3:]
+    return "\n".join(head + [f"    # ... ({len(lines) - 8} more lines)"] + tail).rstrip()
+
+
 class PythonParser(BaseParser):
     language = "python"
 
@@ -70,6 +88,8 @@ class PythonParser(BaseParser):
             result.error = str(exc)
             return result
 
+        source_lines = source.splitlines()
+
         # ── FILE node ─────────────────────────────────────────────────────────
         file_name = Path(fp).stem
         file_qname = fp
@@ -85,7 +105,8 @@ class PythonParser(BaseParser):
         result.nodes.append(file_node)
 
         # ── Walk top-level nodes ──────────────────────────────────────────────
-        self._walk(tree.root_node, fp, file_qname, result, parent_qname=file_qname)
+        self._walk(tree.root_node, fp, file_qname, result,
+                   parent_qname=file_qname, source_lines=source_lines)
         return result
 
     def _walk(
@@ -96,6 +117,7 @@ class PythonParser(BaseParser):
         result: ParseResult,
         parent_qname: str,
         class_qname: Optional[str] = None,
+        source_lines: List[str] = None,
     ) -> None:
         for node in root.children:
             if node.type == "import_statement":
@@ -105,7 +127,7 @@ class PythonParser(BaseParser):
                 self._handle_import_from(node, fp, result)
 
             elif node.type == "class_definition":
-                self._handle_class(node, fp, module_qname, parent_qname, result)
+                self._handle_class(node, fp, module_qname, parent_qname, result, source_lines)
 
             elif node.type == "function_definition":
                 is_method = class_qname is not None
@@ -113,6 +135,7 @@ class PythonParser(BaseParser):
                     node, fp, parent_qname, result,
                     node_type="METHOD" if is_method else "FUNCTION",
                     class_qname=class_qname,
+                    source_lines=source_lines,
                 )
 
             elif node.type in ("expression_statement", "assignment", "annotated_assignment"):
@@ -127,7 +150,25 @@ class PythonParser(BaseParser):
     def _handle_import_from(self, node: "Node", fp: str, result: ParseResult) -> None:
         module_node = node.child_by_field_name("module_name")
         if module_node:
-            result.import_paths.append(_text(module_node))
+            module_name = _text(module_node)
+            result.import_paths.append(module_name)
+
+            # Extract individual imported names for cross-file resolution
+            for child in node.children:
+                if child.type == "import_list" or child.type == "dotted_name":
+                    for sub in child.children:
+                        if sub.type == "dotted_name" or sub.type == "aliased_import":
+                            imported = sub.child_by_field_name("name") or sub
+                            imported_name = _text(imported)
+                            # Create IMPORTS edge: this file → imported symbol
+                            result.edges.append(
+                                ParsedEdge(
+                                    source_qualified=fp,
+                                    target_qualified=f"{module_name}.{imported_name}",
+                                    type="IMPORTS",
+                                    file_path=fp,
+                                )
+                            )
 
     def _handle_class(
         self,
@@ -136,6 +177,7 @@ class PythonParser(BaseParser):
         module_qname: str,
         parent_qname: str,
         result: ParseResult,
+        source_lines: List[str] = None,
     ) -> None:
         name_node = node.child_by_field_name("name")
         if not name_node:
@@ -144,6 +186,13 @@ class PythonParser(BaseParser):
         qname = f"{module_qname}.{name}"
         body = node.child_by_field_name("body")
         doc = _extract_docstring(body)
+
+        # Source snippet
+        snippet = None
+        if source_lines:
+            snippet = _extract_snippet(
+                source_lines, node.start_point[0], node.end_point[0] + 1
+            )
 
         class_rec = ParsedNode(
             type="CLASS",
@@ -154,6 +203,7 @@ class PythonParser(BaseParser):
             end_line=node.end_point[0] + 1,
             docstring=doc,
             language="python",
+            source_snippet=snippet,
         )
         result.nodes.append(class_rec)
         result.edges.append(
@@ -173,7 +223,8 @@ class PythonParser(BaseParser):
         # Walk class body for methods
         if body:
             self._walk(body, fp, module_qname, result,
-                       parent_qname=qname, class_qname=qname)
+                       parent_qname=qname, class_qname=qname,
+                       source_lines=source_lines)
 
     def _handle_function(
         self,
@@ -183,6 +234,7 @@ class PythonParser(BaseParser):
         result: ParseResult,
         node_type: str,
         class_qname: Optional[str],
+        source_lines: List[str] = None,
     ) -> None:
         name_node = node.child_by_field_name("name")
         if not name_node:
@@ -192,6 +244,13 @@ class PythonParser(BaseParser):
         sig = _build_signature(node)
         body = node.child_by_field_name("body")
         doc = _extract_docstring(body)
+
+        # Source snippet
+        snippet = None
+        if source_lines:
+            snippet = _extract_snippet(
+                source_lines, node.start_point[0], node.end_point[0] + 1
+            )
 
         fn_rec = ParsedNode(
             type=node_type,
@@ -203,6 +262,7 @@ class PythonParser(BaseParser):
             signature=sig,
             docstring=doc,
             language="python",
+            source_snippet=snippet,
         )
         result.nodes.append(fn_rec)
         result.edges.append(

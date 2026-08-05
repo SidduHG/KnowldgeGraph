@@ -2,6 +2,18 @@
 Claude Code MCP adapter — stdio transport.
 Run this directly: python -m app.adapters.claude_stdio
 Claude Code connects via: claude mcp add ckg python mcp_server/app/adapters/claude_stdio.py
+
+10 Tools:
+  get_function    — Full details of a function/method/class by name
+  get_callers     — All functions that call a given function
+  get_callees     — All functions called by a given function
+  get_file_map    — All symbols defined in a file (with connection counts)
+  search_symbol   — Fuzzy search across all symbol names
+  get_related     — Files connected via import/call edges (2-hop)
+  get_context     — 1-hop context: everything needed to understand a file
+  get_hierarchy   — Class inheritance tree
+  get_stats       — Quick repo overview for orientation
+  get_definition  — Exact definition + call graph for a symbol
 """
 from __future__ import annotations
 import asyncio
@@ -25,7 +37,7 @@ TOOL_DEFINITIONS = [
         description=(
             "Get full details of a function, method, or class by name. "
             "Returns signature, docstring, file location, and line range. "
-            "Use this BEFORE reading a file — saves token usage."
+            "Use this BEFORE reading a file — saves ~95% token usage."
         ),
         inputSchema={
             "type": "object",
@@ -63,8 +75,8 @@ TOOL_DEFINITIONS = [
     types.Tool(
         name="get_file_map",
         description=(
-            "Get a map of all symbols defined in a file (classes, functions, methods, variables). "
-            "Use this to understand a file's structure without reading its full source."
+            "Get a map of all symbols defined in a file (classes, functions, methods, variables) "
+            "with caller/callee counts. Use this to understand a file's structure without reading it."
         ),
         inputSchema={
             "type": "object",
@@ -96,8 +108,8 @@ TOOL_DEFINITIONS = [
     types.Tool(
         name="get_related",
         description=(
-            "Get files related to a given file via import/call relationships. "
-            "Use this to understand context and blast radius before making changes."
+            "Get files related to a given file via import/call relationships (1-hop and 2-hop). "
+            "Use this to understand blast radius before making changes."
         ),
         inputSchema={
             "type": "object",
@@ -105,6 +117,106 @@ TOOL_DEFINITIONS = [
                 "file_path": {"type": "string", "description": "Path of the file"},
             },
             "required": ["file_path"],
+        },
+    ),
+    types.Tool(
+        name="get_context",
+        description=(
+            "THE PRIMARY TOOL — Get everything needed to understand a file without reading it: "
+            "all symbols (with signatures), imports, incoming/outgoing references. "
+            "~95% token reduction vs reading the full file. Use this FIRST."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "File path to get context for"},
+            },
+            "required": ["file_path"],
+        },
+    ),
+    types.Tool(
+        name="get_hierarchy",
+        description=(
+            "Get the class inheritance tree: parents, children, and methods. "
+            "Use for understanding OOP relationships."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "class_name": {"type": "string", "description": "Name of the class"},
+            },
+            "required": ["class_name"],
+        },
+    ),
+    types.Tool(
+        name="get_stats",
+        description=(
+            "Get a quick overview of the entire repository: file count, node/edge breakdown, "
+            "languages, and hotspot files. Use this FIRST to orient yourself."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
+    types.Tool(
+        name="get_definition",
+        description=(
+            "Get the exact definition of a symbol with its full call graph (what it calls, "
+            "what calls it). Use when you need surgical precision on a specific symbol."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Symbol name (exact)"},
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="search_semantic",
+        description=(
+            "Natural-language symbol search — find a function by what it does, "
+            "not what it's named. E.g. 'function that refreshes auth tokens' → "
+            "ranks `rotate_access_token`, `AuthService.refresh` etc. "
+            "Requires embeddings to have been indexed (reindex_embeddings)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Plain-English query"},
+                "k":     {"type": "integer", "description": "Top-k results (default 10)"},
+                "type":  {
+                    "type": "string",
+                    "enum": ["FUNCTION", "CLASS", "METHOD", "VARIABLE", "TYPE"],
+                    "description": "Optional: filter by type",
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    types.Tool(
+        name="reindex_embeddings",
+        description=(
+            "Compute semantic embeddings for every node that doesn't have one. "
+            "Run this once after a full index to enable search_semantic."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="get_diff_context",
+        description=(
+            "PR-review superpower — given a git ref (HEAD, HEAD~1, main...feature, sha1..sha2), "
+            "return ONLY the symbols whose lines changed plus 1-hop blast radius (callers/callees). "
+            "Drop-in replacement for pasting a raw diff; ~90%+ token savings."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "ref":       {"type": "string", "description": "Git ref or range. Default: HEAD"},
+                "repo_path": {"type": "string", "description": "Optional repo root override"},
+            },
+            "required": [],
         },
     ),
 ]
@@ -132,6 +244,29 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             )
         elif name == "get_related":
             data = await resolvers.get_related(session, arguments["file_path"])
+        elif name == "get_context":
+            data = await resolvers.get_context(session, arguments["file_path"])
+        elif name == "get_hierarchy":
+            data = await resolvers.get_hierarchy(session, arguments["class_name"])
+        elif name == "get_stats":
+            data = await resolvers.get_stats(session)
+        elif name == "get_definition":
+            data = await resolvers.get_definition(session, arguments["name"])
+        elif name == "get_diff_context":
+            data = await resolvers.get_diff_context(
+                session,
+                ref=arguments.get("ref", "HEAD"),
+                repo_path=arguments.get("repo_path"),
+            )
+        elif name == "search_semantic":
+            data = await resolvers.search_semantic(
+                session,
+                arguments["query"],
+                k=arguments.get("k", 10),
+                symbol_type=arguments.get("type"),
+            )
+        elif name == "reindex_embeddings":
+            data = await resolvers.reindex_embeddings(session)
         else:
             data = {"error": f"Unknown tool: {name}"}
 
